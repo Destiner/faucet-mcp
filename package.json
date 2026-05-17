@@ -1,0 +1,39 @@
+{
+  "name": "faucet-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that lets a coding agent request small dev funds (ETH/WETH/USDC/USDT) with per-call + 24h caps and TOTP approval.",
+  "license": "MIT",
+  "author": "Timur Badretdinov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Destiner/faucet-mcp.git"
+  },
+  "bugs": "https://github.com/Destiner/faucet-mcp/issues",
+  "homepage": "https://github.com/Destiner/faucet-mcp#readme",
+  "bin": {
+    "faucet-mcp": "src/server.ts",
+    "faucet-setup": "bin/setup.ts"
+  },
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "setup": "bun run bin/setup.ts",
+    "check": "biome check",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@rhinestone/shared-configs": "^1.4.91",
+    "otplib": "^12.0.1",
+    "qrcode-terminal": "^0.12.0",
+    "viem": "^2.48.8",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.1.0",
+    "@types/bun": "^1.2.8",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^5.8.2"
+  }
+}
