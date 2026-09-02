@@ -20,6 +20,7 @@ import {
   formatBalance,
   getFunderBalance,
   getFundingAccount,
+  PostWrapTransferError,
   sendToken,
 } from './send'
 import { loadPrunedState, recordSend, sumWindow } from './state'
@@ -267,6 +268,9 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
       message: (err as Error).message,
       chain: chain.name,
       token,
+      ...(err instanceof PostWrapTransferError
+        ? { wrapTxHash: err.wrapTxHash }
+        : {}),
     })
   }
 
@@ -397,7 +401,7 @@ async function main() {
           'Hard caps (10x the soft caps) cannot be bypassed even with a code. ' +
           'Amounts are decimal strings (human units), not wei. ' +
           'WETH on chains whose native asset is ETH (ethereum/base/arbitrum/optimism + their sepolias) ' +
-          'is wrapped just-in-time from the funder\'s ETH balance when the WETH balance is short; ' +
+          "is wrapped just-in-time from the funder's ETH balance when the WETH balance is short; " +
           'in that case the response also includes `wrapTxHash` for the deposit() call.',
         inputSchema: {
           type: 'object',
@@ -445,7 +449,7 @@ async function main() {
           'Return faucet wallet balances, configured caps, and remaining 24h budget per pool. ' +
           'Use this to plan before calling send, so you do not trigger unnecessary denials. ' +
           '`funder_balance` is the literal on-chain balance of that token — for WETH on native-ETH chains ' +
-          'a `send` can still succeed via JIT wrap as long as the funder\'s ETH covers the shortfall.',
+          "a `send` can still succeed via JIT wrap as long as the funder's ETH covers the shortfall.",
         inputSchema: {
           type: 'object',
           properties: {

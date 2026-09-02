@@ -20,6 +20,7 @@
     "start": "bun run src/server.ts",
     "setup": "bun run bin/setup.ts",
     "check": "biome check",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

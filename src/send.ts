@@ -139,6 +139,38 @@ interface SendResult {
   wrapTxHash?: Hex
 }
 
+class PostWrapTransferError extends Error {
+  constructor(
+    public readonly wrapTxHash: Hex,
+    cause: unknown,
+  ) {
+    super(
+      `WETH wrap ${wrapTxHash} succeeded, but the transfer failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    )
+    this.name = 'PostWrapTransferError'
+  }
+}
+
+async function retryEstimateGas(
+  estimate: () => Promise<bigint>,
+  attempts = 10,
+  delayMs = 500,
+): Promise<bigint> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await estimate()
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
+    }
+  }
+  throw lastError
+}
+
 async function sendToken(
   chain: Chain,
   token: TokenSymbol,
@@ -150,6 +182,7 @@ async function sendToken(
   const { account, publicClient, walletClient } = getClients(chain)
 
   let wrapTxHash: Hex | undefined
+  let postWrapNonce: number | undefined
   if (
     token === 'WETH' &&
     resolved.kind === 'erc20' &&
@@ -163,15 +196,26 @@ async function sendToken(
     })
     if (wethBalance < amountRaw) {
       const shortfall = amountRaw - wethBalance
+      const wrapNonce = await publicClient.getTransactionCount({
+        address: account.address,
+        blockTag: 'pending',
+      })
       wrapTxHash = await walletClient.sendTransaction({
         to: resolved.address,
         value: shortfall,
+        nonce: wrapNonce,
         data: encodeFunctionData({
           abi: WETH_DEPOSIT_ABI,
           functionName: 'deposit',
         }),
       })
-      await publicClient.waitForTransactionReceipt({ hash: wrapTxHash })
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: wrapTxHash,
+      })
+      if (receipt.status !== 'success') {
+        throw new Error(`WETH wrap ${wrapTxHash} reverted`)
+      }
+      postWrapNonce = wrapNonce + 1
     }
   }
 
@@ -182,14 +226,35 @@ async function sendToken(
       value: amountRaw,
     })
   } else {
-    txHash = await walletClient.sendTransaction({
-      to: resolved.address,
-      data: encodeFunctionData({
-        abi: erc20Abi,
-        functionName: 'transfer',
-        args: [recipient, amountRaw],
-      }),
+    const data = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: 'transfer',
+      args: [recipient, amountRaw],
     })
+    try {
+      // Public RPCs may expose the wrap receipt before every backend serves its state.
+      // Estimate until one sees the balance, then avoid a second stale estimation.
+      const gas = wrapTxHash
+        ? await retryEstimateGas(() =>
+            publicClient.estimateGas({
+              account,
+              to: resolved.address,
+              data,
+            }),
+          )
+        : undefined
+      txHash = await walletClient.sendTransaction({
+        to: resolved.address,
+        data,
+        ...(gas ? { gas } : {}),
+        ...(postWrapNonce === undefined ? {} : { nonce: postWrapNonce }),
+      })
+    } catch (error) {
+      if (wrapTxHash) {
+        throw new PostWrapTransferError(wrapTxHash, error)
+      }
+      throw error
+    }
   }
   await publicClient.waitForTransactionReceipt({ hash: txHash })
   const explorer = chain.blockExplorers?.default?.url
@@ -212,5 +277,7 @@ export {
   getFunderBalance,
   getFundingAccount,
   getRecipientBalance,
+  PostWrapTransferError,
+  retryEstimateGas,
   sendToken,
 }
