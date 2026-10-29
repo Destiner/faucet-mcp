@@ -5,32 +5,35 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import type { Address } from 'viem'
-import { isAddress, parseUnits } from 'viem'
+import { formatUnits, parseUnits } from 'viem'
 import { z } from 'zod'
 import {
   ChainUnsupportedError,
-  getChainClass,
   resolveChain,
   SUPPORTED_CHAIN_NAMES,
+  type Target,
 } from './chains'
 import { getLimits } from './limits'
 import { verifyOtp } from './otp'
-import {
-  formatBalance,
-  getFunderBalance,
-  getFundingAccount,
-  sendToken,
-} from './send'
 import { loadPrunedState, recordSend, sumWindow } from './state'
 import {
   getPool,
   normalizeToken,
+  type ResolvedToken,
   resolveToken,
   SUPPORTED_TOKENS,
+  type TokenSymbol,
   TokenUnsupportedError,
   TokenUnsupportedOnChainError,
 } from './tokens'
+import {
+  getFunderAddress,
+  getFunderBalance,
+  isValidRecipient,
+  preflight,
+  RECIPIENT_FORMAT,
+  sendToken,
+} from './wallet'
 
 const sendInputSchema = z.object({
   amount: z
@@ -39,15 +42,19 @@ const sendInputSchema = z.object({
   token: z
     .string()
     .describe(
-      'Token symbol. One of: ETH, WETH, USDC, USDT (case-insensitive).',
+      'Token symbol. EVM: ETH, WETH, USDC, USDT. Solana: SOL, USDC (case-insensitive).',
     ),
   chain: z
     .string()
     .describe(
-      'Chain name. Mainnets: ethereum, base, arbitrum, optimism, polygon, plasma. ' +
-        'Testnets: sepolia, base-sepolia, arbitrum-sepolia, optimism-sepolia, plasma-testnet.',
+      'Chain name. Mainnets: ethereum, base, arbitrum, optimism, polygon, plasma, solana-mainnet. ' +
+        'Testnets: sepolia, base-sepolia, arbitrum-sepolia, optimism-sepolia, plasma-testnet, solana-devnet.',
     ),
-  recipient: z.string().describe('0x-prefixed recipient address.'),
+  recipient: z
+    .string()
+    .describe(
+      'Recipient wallet: 0x address on EVM chains, base58 public key on Solana.',
+    ),
   code: z
     .string()
     .optional()
@@ -89,16 +96,18 @@ function okContent(payload: unknown) {
   }
 }
 
+function invalidInputIssues(error: z.ZodError) {
+  return errorContent({
+    code: 'INVALID_INPUT',
+    issues: error.issues.map((i) => ({
+      path: i.path.join('.'),
+      problem: i.message,
+    })),
+  })
+}
+
 async function handleSend(input: z.infer<typeof sendInputSchema>) {
   // 1. Input validation
-  if (!isAddress(input.recipient)) {
-    return errorContent({
-      code: 'INVALID_INPUT',
-      field: 'recipient',
-      problem: 'not a valid 0x address',
-      hint: 'pass a 20-byte hex address like 0xCb1f054bCfc93c6eFAC556020D3822E425D37404',
-    })
-  }
   const amountNum = Number(input.amount)
   if (!Number.isFinite(amountNum) || amountNum <= 0) {
     return errorContent({
@@ -109,29 +118,48 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
     })
   }
 
-  let chain: ReturnType<typeof resolveChain>
+  let target: Target
   try {
-    chain = resolveChain(input.chain)
+    target = resolveChain(input.chain)
   } catch (err) {
     if (err instanceof ChainUnsupportedError) return errorContent(err.toJson())
     throw err
   }
-  const chainClass = getChainClass(chain)
+  const { chainClass } = target
 
-  let token: ReturnType<typeof normalizeToken>
+  if (!isValidRecipient(target, input.recipient)) {
+    return errorContent({
+      code: 'INVALID_INPUT',
+      field: 'recipient',
+      chain: target.name,
+      ...RECIPIENT_FORMAT[target.vm],
+    })
+  }
+
+  let token: TokenSymbol
+  let resolved: ResolvedToken
   try {
     token = normalizeToken(input.token)
+    resolved = resolveToken(token, target)
   } catch (err) {
-    if (err instanceof TokenUnsupportedError) return errorContent(err.toJson())
+    if (
+      err instanceof TokenUnsupportedError ||
+      err instanceof TokenUnsupportedOnChainError
+    )
+      return errorContent(err.toJson())
     throw err
   }
 
+  let amountRaw: bigint
   try {
-    resolveToken(token, chain.id)
+    amountRaw = parseUnits(input.amount, resolved.decimals)
   } catch (err) {
-    if (err instanceof TokenUnsupportedOnChainError)
-      return errorContent(err.toJson())
-    throw err
+    return errorContent({
+      code: 'INVALID_INPUT',
+      field: 'amount',
+      problem: (err as Error).message,
+      hint: 'Use a decimal amount with no more precision than the token supports',
+    })
   }
 
   // 2. Limit checks
@@ -210,62 +238,50 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
     }
   }
 
-  // 3. Balance check
-  let resolvedDecimals: number
-  let amountRaw: bigint
+  // 3. Funds check
+  let issue: Awaited<ReturnType<typeof preflight>>
   try {
-    const r = resolveToken(token, chain.id)
-    resolvedDecimals = r.decimals
-    amountRaw = parseUnits(input.amount, r.decimals)
-  } catch (err) {
-    return errorContent({
-      code: 'INVALID_INPUT',
-      field: 'amount',
-      problem: (err as Error).message,
-      hint: 'Use a decimal amount with no more precision than the token supports',
-    })
-  }
-
-  let balanceCheck: Awaited<ReturnType<typeof getFunderBalance>>
-  try {
-    balanceCheck = await getFunderBalance(chain, token, amountRaw)
+    issue = await preflight(target, token, input.recipient, amountRaw)
   } catch (err) {
     return errorContent({
       code: 'RPC_ERROR',
       message: (err as Error).message,
-      chain: chain.name,
+      chain: target.name,
     })
   }
-  if (!balanceCheck.sufficient) {
+  if (issue?.kind === 'invalid_recipient') {
+    return errorContent({
+      code: 'INVALID_INPUT',
+      field: 'recipient',
+      problem: issue.problem,
+      hint: issue.hint,
+    })
+  }
+  if (issue?.kind === 'insufficient') {
+    const funder = await getFunderAddress(target.vm)
     return errorContent({
       code: 'INSUFFICIENT_FUNDS',
-      token,
-      chain: chain.name,
+      token: issue.token,
+      chain: target.name,
       requested: input.amount,
-      funder_balance: formatBalance(
-        balanceCheck.balance,
-        balanceCheck.decimals,
-      ),
+      funder_balance: formatUnits(issue.balance, issue.decimals),
+      funder_needs: formatUnits(issue.needed, issue.decimals),
       hint:
-        'The faucet wallet is out of this token. Top up the wallet ' +
-        `(${getFundingAccount().address}) on ${chain.name}.`,
+        issue.token === token
+          ? `The faucet wallet is out of ${token}. Top up ${funder} on ${target.name}.`
+          : `The faucet wallet needs more ${issue.token} for fees / account rent. Top up ${funder} on ${target.name}.`,
     })
   }
 
   // 4. Execute
   let result: Awaited<ReturnType<typeof sendToken>>
   try {
-    result = await sendToken(
-      chain,
-      token,
-      input.recipient as Address,
-      input.amount,
-    )
+    result = await sendToken(target, token, input.recipient, amountRaw)
   } catch (err) {
     return errorContent({
       code: 'TX_FAILED',
       message: (err as Error).message,
-      chain: chain.name,
+      chain: target.name,
       token,
     })
   }
@@ -273,7 +289,7 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
   // 5. Record
   recordSend({
     ts: Date.now(),
-    chainId: chain.id,
+    chainId: target.chainId,
     chainClass,
     token,
     pool,
@@ -286,14 +302,19 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
     ok: true,
     txHash: result.txHash,
     blockExplorerUrl: result.blockExplorerUrl,
-    chain: chain.name,
-    chainId: chain.id,
+    chain: target.name,
+    chainId: target.chainId,
+    caip2: target.caip2,
+    vm: target.vm,
     token,
     amount: input.amount,
     recipient: input.recipient,
-    decimals: resolvedDecimals,
+    decimals: resolved.decimals,
     approval_used: needsApproval,
     ...(result.wrapTxHash ? { wrapTxHash: result.wrapTxHash } : {}),
+    ...(result.ataCreated !== undefined
+      ? { ataCreated: result.ataCreated }
+      : {}),
     budget_after: {
       pool,
       chain_class: chainClass,
@@ -306,62 +327,62 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
 
 async function handleStatus(input: z.infer<typeof statusInputSchema>) {
   const state = loadPrunedState()
-  const funderAddress = (() => {
-    try {
-      return getFundingAccount().address
-    } catch {
-      return null
-    }
-  })()
+  const funderAddresses = {
+    evm: await getFunderAddress('evm'),
+    solana: await getFunderAddress('svm'),
+  }
 
   const chainNames = input.chain ? [input.chain] : SUPPORTED_CHAIN_NAMES
-
   const tokenNames = input.token ? [input.token] : SUPPORTED_TOKENS
 
-  const rows = []
+  const pairs: { target: Target; token: TokenSymbol; info: ResolvedToken }[] =
+    []
   for (const chainName of chainNames) {
-    let chain: ReturnType<typeof resolveChain>
+    let target: Target
     try {
-      chain = resolveChain(chainName)
+      target = resolveChain(chainName)
     } catch {
       continue
     }
-    const chainClass = getChainClass(chain)
     for (const tokenInput of tokenNames) {
-      let token: ReturnType<typeof normalizeToken>
       try {
-        token = normalizeToken(tokenInput)
-      } catch {
-        continue
-      }
-      let tokenInfo: ReturnType<typeof resolveToken>
-      try {
-        tokenInfo = resolveToken(token, chain.id)
-      } catch {
-        continue
-      }
-      const pool = getPool(token)
-      const limits = getLimits(chainClass, pool)
-      const usedInWindow = sumWindow(state, chainClass, pool)
+        const token = normalizeToken(tokenInput)
+        pairs.push({ target, token, info: resolveToken(token, target) })
+      } catch {}
+    }
+  }
 
+  const rows = await Promise.all(
+    pairs.map(async ({ target, token, info }) => {
+      const pool = getPool(token)
+      const limits = getLimits(target.chainClass, pool)
+      const usedInWindow = sumWindow(state, target.chainClass, pool)
+      const hasFunder =
+        (target.vm === 'evm' ? funderAddresses.evm : funderAddresses.solana) !==
+        null
       let funderBalance: string | null = null
-      if (funderAddress) {
+      if (hasFunder) {
         try {
-          const bal = await getFunderBalance(chain, token, 0n)
-          funderBalance = formatBalance(bal.balance, bal.decimals)
+          funderBalance = await getFunderBalance(target, token)
         } catch {
           funderBalance = null
         }
       }
-
-      rows.push({
-        chain: chain.name,
-        chainId: chain.id,
-        chainClass,
+      return {
+        chain: target.name,
+        chainId: target.chainId,
+        caip2: target.caip2,
+        vm: target.vm,
+        chainClass: target.chainClass,
         token,
         pool,
-        tokenAddress: tokenInfo.kind === 'erc20' ? tokenInfo.address : 'native',
-        decimals: tokenInfo.decimals,
+        tokenAddress:
+          info.kind === 'erc20'
+            ? info.address
+            : info.kind === 'spl'
+              ? info.mint
+              : 'native',
+        decimals: info.decimals,
         funder_balance: funderBalance,
         soft_per_call: limits.perCall,
         soft_window_24h: limits.window24h,
@@ -370,12 +391,12 @@ async function handleStatus(input: z.infer<typeof statusInputSchema>) {
         used_in_window_24h: usedInWindow,
         remaining_soft_window: Math.max(0, limits.window24h - usedInWindow),
         remaining_hard_window: Math.max(0, limits.hardWindow24h - usedInWindow),
-      })
-    }
-  }
+      }
+    }),
+  )
 
   return okContent({
-    funder_address: funderAddress,
+    funder_addresses: funderAddresses,
     rows,
   })
 }
@@ -391,14 +412,16 @@ async function main() {
       {
         name: 'send',
         description:
-          'Send a small amount of ETH/WETH/USDC/USDT to a recipient address from the faucet wallet. ' +
-          'Caps apply per chain class (mainnet/testnet) and per pool (USDC+USDT share a stablecoin pool, ' +
-          'ETH+WETH share a pool). Amounts above the soft cap require a 6-digit TOTP code from the user. ' +
+          'Send a small amount of ETH/WETH/USDC/USDT (EVM) or SOL/USDC (Solana) to a recipient from the faucet wallet. ' +
+          'Caps apply per chain class (mainnet/testnet) and per pool (USDC+USDT share a stablecoin pool across EVM and Solana, ' +
+          'ETH+WETH share a pool, SOL has its own). Amounts above the soft cap require a 6-digit TOTP code from the user. ' +
           'Hard caps (10x the soft caps) cannot be bypassed even with a code. ' +
           'Amounts are decimal strings (human units), not wei. ' +
           'WETH on chains whose native asset is ETH (ethereum/base/arbitrum/optimism + their sepolias) ' +
-          'is wrapped just-in-time from the funder\'s ETH balance when the WETH balance is short; ' +
-          'in that case the response also includes `wrapTxHash` for the deposit() call.',
+          "is wrapped just-in-time from the funder's ETH balance when the WETH balance is short; " +
+          'in that case the response also includes `wrapTxHash` for the deposit() call. ' +
+          "On Solana, `txHash` is the transaction signature; USDC sends create the recipient's associated " +
+          'token account when missing (`ataCreated: true`), so pass the wallet address, not a token account.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -409,26 +432,31 @@ async function main() {
             },
             token: {
               type: 'string',
-              description: 'One of: ETH, WETH, USDC, USDT (case-insensitive)',
+              description:
+                'EVM: ETH, WETH, USDC, USDT. Solana: SOL, USDC (case-insensitive)',
               enum: [
                 'ETH',
                 'WETH',
                 'USDC',
                 'USDT',
+                'SOL',
                 'eth',
                 'weth',
                 'usdc',
                 'usdt',
+                'sol',
               ],
             },
             chain: {
               type: 'string',
-              description: 'Chain name (e.g. "base", "sepolia", "ethereum")',
+              description:
+                'Chain name (e.g. "base", "sepolia", "solana-devnet")',
               enum: SUPPORTED_CHAIN_NAMES,
             },
             recipient: {
               type: 'string',
-              description: '0x-prefixed recipient address',
+              description:
+                '0x address on EVM chains, base58 wallet address on Solana',
             },
             code: {
               type: 'string',
@@ -443,9 +471,10 @@ async function main() {
         name: 'status',
         description:
           'Return faucet wallet balances, configured caps, and remaining 24h budget per pool. ' +
+          '`funder_addresses` lists the EVM and Solana funder wallets. ' +
           'Use this to plan before calling send, so you do not trigger unnecessary denials. ' +
           '`funder_balance` is the literal on-chain balance of that token — for WETH on native-ETH chains ' +
-          'a `send` can still succeed via JIT wrap as long as the funder\'s ETH covers the shortfall.',
+          "a `send` can still succeed via JIT wrap as long as the funder's ETH covers the shortfall.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -457,7 +486,7 @@ async function main() {
             token: {
               type: 'string',
               description: 'Optional token filter.',
-              enum: ['ETH', 'WETH', 'USDC', 'USDT'],
+              enum: SUPPORTED_TOKENS,
             },
           },
         },
@@ -470,26 +499,14 @@ async function main() {
       if (req.params.name === 'send') {
         const parsed = sendInputSchema.safeParse(req.params.arguments ?? {})
         if (!parsed.success) {
-          return errorContent({
-            code: 'INVALID_INPUT',
-            issues: parsed.error.issues.map((i) => ({
-              path: i.path.join('.'),
-              problem: i.message,
-            })),
-          })
+          return invalidInputIssues(parsed.error)
         }
         return await handleSend(parsed.data)
       }
       if (req.params.name === 'status') {
         const parsed = statusInputSchema.safeParse(req.params.arguments ?? {})
         if (!parsed.success) {
-          return errorContent({
-            code: 'INVALID_INPUT',
-            issues: parsed.error.issues.map((i) => ({
-              path: i.path.join('.'),
-              problem: i.message,
-            })),
-          })
+          return invalidInputIssues(parsed.error)
         }
         return await handleStatus(parsed.data)
       }
@@ -510,7 +527,11 @@ async function main() {
   await server.connect(transport)
 }
 
-main().catch((err) => {
-  console.error('faucet mcp failed to start:', err)
-  process.exit(1)
-})
+export { handleSend, handleStatus }
+
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error('faucet mcp failed to start:', err)
+    process.exit(1)
+  })
+}

@@ -24,6 +24,14 @@ const LIMITS: Record<ChainClass, Record<TokenPool, LimitConfig>> = {
       hardPerCall: 0.0002,
       hardWindow24h: 0.005,
     },
+    // Must stay above the ~0.00089 SOL rent-exempt minimum, or sends to fresh
+    // wallets can never succeed.
+    SOL: {
+      perCall: 0.002,
+      window24h: 0.02,
+      hardPerCall: 0.02,
+      hardWindow24h: 0.2,
+    },
   },
   testnet: {
     STABLE: {
@@ -37,6 +45,12 @@ const LIMITS: Record<ChainClass, Record<TokenPool, LimitConfig>> = {
       window24h: 0.01,
       hardPerCall: 0.01,
       hardWindow24h: 0.1,
+    },
+    SOL: {
+      perCall: 0.1,
+      window24h: 1,
+      hardPerCall: 1,
+      hardWindow24h: 10,
     },
   },
 }

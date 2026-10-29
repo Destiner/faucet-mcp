@@ -5,13 +5,12 @@ import {
   createWalletClient,
   encodeFunctionData,
   erc20Abi,
-  formatUnits,
   type Hex,
   http,
-  parseUnits,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { mainnet, sepolia } from 'viem/chains'
+import type { EvmTarget } from './chains'
 import { resolveToken, type TokenSymbol } from './tokens'
 
 // Minimal WETH9 ABI — only the methods we call ourselves. `transfer` already
@@ -71,12 +70,14 @@ interface BalanceCheck {
 }
 
 async function getFunderBalance(
-  chain: Chain,
+  target: EvmTarget,
   token: TokenSymbol,
   amount: bigint,
 ): Promise<BalanceCheck> {
+  const { chain } = target
   const { account, publicClient } = getClients(chain)
-  const resolved = resolveToken(token, chain.id)
+  const resolved = resolveToken(token, target)
+  if (resolved.kind === 'spl') throw new Error('SPL token on EVM chain')
 
   if (resolved.kind === 'native') {
     const balance = await publicClient.getBalance({ address: account.address })
@@ -111,42 +112,22 @@ async function getFunderBalance(
   return { balance, decimals: resolved.decimals, sufficient: balance >= amount }
 }
 
-async function getRecipientBalance(
-  chain: Chain,
-  token: TokenSymbol,
-  recipient: Address,
-): Promise<{ balance: bigint; decimals: number }> {
-  const { publicClient } = getClients(chain)
-  const resolved = resolveToken(token, chain.id)
-  if (resolved.kind === 'native') {
-    const balance = await publicClient.getBalance({ address: recipient })
-    return { balance, decimals: resolved.decimals }
-  }
-  const balance = await publicClient.readContract({
-    address: resolved.address,
-    abi: erc20Abi,
-    functionName: 'balanceOf',
-    args: [recipient],
-  })
-  return { balance, decimals: resolved.decimals }
-}
-
 interface SendResult {
-  txHash: Hex
+  txHash: string
   blockExplorerUrl?: string
-  amountRaw: bigint
-  decimals: number
-  wrapTxHash?: Hex
+  wrapTxHash?: string
+  ataCreated?: boolean
 }
 
 async function sendToken(
-  chain: Chain,
+  target: EvmTarget,
   token: TokenSymbol,
   recipient: Address,
-  humanAmount: string,
+  amountRaw: bigint,
 ): Promise<SendResult> {
-  const resolved = resolveToken(token, chain.id)
-  const amountRaw = parseUnits(humanAmount, resolved.decimals)
+  const { chain } = target
+  const resolved = resolveToken(token, target)
+  if (resolved.kind === 'spl') throw new Error('SPL token on EVM chain')
   const { account, publicClient, walletClient } = getClients(chain)
 
   let wrapTxHash: Hex | undefined
@@ -196,21 +177,9 @@ async function sendToken(
   return {
     txHash,
     blockExplorerUrl: explorer ? `${explorer}/tx/${txHash}` : undefined,
-    amountRaw,
-    decimals: resolved.decimals,
     wrapTxHash,
   }
 }
 
-function formatBalance(balance: bigint, decimals: number): string {
-  return formatUnits(balance, decimals)
-}
-
 export type { BalanceCheck, SendResult }
-export {
-  formatBalance,
-  getFunderBalance,
-  getFundingAccount,
-  getRecipientBalance,
-  sendToken,
-}
+export { getFunderBalance, getFundingAccount, sendToken }

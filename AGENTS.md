@@ -1,6 +1,6 @@
 # Faucet
 
-MCP server that lets a coding agent request small amounts of ETH/WETH/USDC/USDT from a personal hot wallet, with safety rails so a misbehaving agent can't drain it.
+MCP server that lets a coding agent request small amounts of ETH/WETH/USDC/USDT (EVM) or SOL/USDC (Solana) from personal hot wallets, with safety rails so a misbehaving agent can't drain it.
 
 ## Motivation
 
@@ -21,8 +21,9 @@ When a request exceeds the soft cap but is under the hard cap, the call returns 
 
 Limits are per pool, not per token:
 
-- `STABLE`: USDC + USDT share one window
+- `STABLE`: USDC + USDT share one window, across EVM and Solana
 - `ETHWETH`: ETH + WETH share one window
+- `SOL`: SOL alone
 
 So 0.5 USDC and 0.5 USDT in the same 24h count as 1.0 against the stable window.
 
@@ -32,15 +33,19 @@ So 0.5 USDC and 0.5 USDT in the same 24h count as 1.0 against the stable window.
 | ----------- | ------ | --------- | -------- | --------- | -------- |
 | mainnet     | stable | 0.10      | 1.0      | 1.0       | 10.0     |
 | mainnet     | eth    | 0.00002   | 0.0005   | 0.0002    | 0.005    |
+| mainnet     | sol    | 0.002     | 0.02     | 0.02      | 0.2      |
 | testnet     | stable | 2         | 20       | 20        | 200      |
 | testnet     | eth    | 0.001     | 0.01     | 0.01      | 0.1      |
+| testnet     | sol    | 0.1       | 1        | 1         | 10       |
+
+Mainnet SOL caps stay above the ~0.00089 SOL rent-exempt minimum; below it a send to a fresh wallet can never land.
 
 24h windows are rolling (not calendar-day), pruned on each read.
 
 ### Tools
 
-- `send(amount, token, chain, recipient, code?)` — execute a transfer. `amount` is a decimal string in human units (e.g. `"0.5"`), never wei. `code` is required only when the request exceeds the soft cap.
-- `status(chain?, token?)` — funder balance per chain/token, configured caps, used budget, remaining window. Use this to plan before calling `send` to avoid unnecessary denials.
+- `send(amount, token, chain, recipient, code?)` — execute a transfer. `amount` is a decimal string in human units (e.g. `"0.5"`), never wei. `recipient` is a 0x address on EVM and a base58 wallet (owner) address on Solana. `code` is required only when the request exceeds the soft cap. Responses carry `chainId` (registry id; Solana uses Rhinestone's pseudo-ids `792703809`/`792703810`), `caip2`, and `vm`. On Solana `txHash` is the transaction signature.
+- `status(chain?, token?)` — `funder_addresses: { evm, solana }` plus, per chain/token, funder balance, configured caps, used budget, remaining window. Use this to plan before calling `send` to avoid unnecessary denials.
 
 ### Errors
 
@@ -48,9 +53,9 @@ So 0.5 USDC and 0.5 USDT in the same 24h count as 1.0 against the stable window.
 
 ### Supported
 
-Chains: `ethereum`, `base`, `arbitrum`, `optimism`, `polygon`, `plasma`, `sepolia`, `base-sepolia`, `arbitrum-sepolia`, `optimism-sepolia`, `plasma-testnet`.
+Chains: `ethereum`, `base`, `arbitrum`, `optimism`, `polygon`, `plasma`, `solana-mainnet` (aliases `solana`, `sol`), `sepolia`, `base-sepolia`, `arbitrum-sepolia`, `optimism-sepolia`, `plasma-testnet`, `solana-devnet` (aliases `sol-devnet`, `devnet`).
 
-Tokens: `ETH`, `WETH`, `USDC`, `USDT`. USDT maps to native USDT on BSC and to `USDT0` (LayerZero OFT) elsewhere — the agent passes `USDT` regardless.
+Tokens: EVM `ETH`, `WETH`, `USDC`, `USDT`; Solana `SOL`, `USDC` (no USDT). USDT maps to native USDT on BSC and to `USDT0` (LayerZero OFT) elsewhere — the agent passes `USDT` regardless.
 
 Token addresses come from `@rhinestone/shared-configs` `chainRegistry`, not a local map.
 
@@ -80,6 +85,8 @@ Token addresses come from `@rhinestone/shared-configs` `chainRegistry`, not a lo
    FUNDING_PRIVATE_KEY=0x...
    ```
 
+   For Solana, `bun run solana-keygen` generates `SOLANA_FUNDING_PRIVATE_KEY` into `.env` and prints only the address. Solana chains are disabled (funder address `null`) without it.
+
    Fund the wallet with small dev amounts of the tokens you expect to send (testnet first).
 
 4. Wire into Claude Code (`~/.claude.json` or project `.claude/settings.json`):
@@ -97,7 +104,7 @@ Token addresses come from `@rhinestone/shared-configs` `chainRegistry`, not a lo
 
    `bun run --cwd <dir>` makes bun auto-load `.env` from the faucet directory regardless of where the agent is invoked.
 
-State is persisted at `~/.faucet/state.json` (rolling 24h send log + OTP replay cache). Override with `FAUCET_STATE_FILE=`. RPCs can be overridden per chain with `RPC_URL_<chainId>=`.
+State is persisted at `~/.faucet/state.json` (rolling 24h send log + OTP replay cache). Override with `FAUCET_STATE_FILE=`. RPCs can be overridden per chain with `RPC_URL_<chainId>=` (Solana: `RPC_URL_792703809` / `RPC_URL_792703810`; HTTP only — confirmation is polled, no websocket).
 
 ## Limitations (v0.1)
 
@@ -107,6 +114,8 @@ State is persisted at `~/.faucet/state.json` (rolling 24h send log + OTP replay 
 - **Gas comes out of ETH balance** and is not surfaced as a distinct error. An out-of-gas send shows up as `TX_FAILED`. JIT wrap doubles the gas cost (deposit + transfer); on mainnet Ethereum that's tens of cents per call worst case, negligible on L2s and testnets.
 - **TOTP secret in `.env` plaintext.** Fine given the threat model (a process that can read `.env` can already read `FUNDING_PRIVATE_KEY`).
 - **No audit log beyond 24h.** Older sends are pruned.
+- **Solana USDC creates the recipient's associated token account** when missing (`ataCreated: true`); the funder pays ~0.002 SOL rent. Owner may be off-curve (PDA smart accounts work). Passing a token account as `recipient` is rejected.
+- **Solana funder needs SOL for fees** even on USDC sends; a shortfall returns `INSUFFICIENT_FUNDS` with `token: "SOL"`. No priority fees are set, so mainnet sends may land slowly under congestion.
 - **Recipient is required.** No default — the agent must always specify where funds go. This is intentional.
 
 ## Layout
@@ -114,13 +123,16 @@ State is persisted at `~/.faucet/state.json` (rolling 24h send log + OTP replay 
 ```
 src/
   server.ts    MCP stdio entrypoint
-  send.ts      viem transfer logic (ETH native, ERC20 transfer)
-  chains.ts    name → viem Chain
-  tokens.ts    symbol → address via chainRegistry (USDC/USDT/USDT0/WETH/ETH)
+  wallet.ts    VM dispatch (recipient validation, balances, preflight, send)
+  evm.ts       viem transfer logic (ETH native, ERC20 transfer, WETH JIT wrap)
+  solana.ts    @solana/kit transfer logic (SOL, SPL with ATA creation)
+  chains.ts    name → EVM/SVM target via chainRegistry
+  tokens.ts    symbol → address/mint via chainRegistry (USDC/USDT/USDT0/WETH/ETH/SOL)
   limits.ts    soft + hard caps per (chain class, pool)
   state.ts    ~/.faucet/state.json io + rolling window math
   otp.ts       TOTP verify + single-use replay cache
 bin/
   setup.ts     generate secret + otpauth URI + QR for 1P / Apple Passwords
   verify.ts    smoke-test a TOTP code against the secret
+  solana-keygen.ts  generate SOLANA_FUNDING_PRIVATE_KEY into .env
 ```

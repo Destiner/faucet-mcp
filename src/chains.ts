@@ -1,9 +1,12 @@
-import { chains } from '@rhinestone/shared-configs'
+import { chainRegistry, chains } from '@rhinestone/shared-configs'
 import type { Chain } from 'viem'
 
 const CHAIN_BY_ID: Record<number, Chain> = Object.fromEntries(
   (chains as readonly Chain[]).map((c) => [c.id, c]),
 )
+
+const SOLANA_MAINNET_ID = 792703809
+const SOLANA_DEVNET_ID = 792703810
 
 const NAME_TO_ID: Record<string, number> = {
   ethereum: 1,
@@ -17,6 +20,9 @@ const NAME_TO_ID: Record<string, number> = {
   polygon: 137,
   matic: 137,
   plasma: 9745,
+  'solana-mainnet': SOLANA_MAINNET_ID,
+  solana: SOLANA_MAINNET_ID,
+  sol: SOLANA_MAINNET_ID,
   sepolia: 11155111,
   'ethereum-sepolia': 11155111,
   'base-sepolia': 84532,
@@ -25,6 +31,9 @@ const NAME_TO_ID: Record<string, number> = {
   'optimism-sepolia': 11155420,
   'op-sepolia': 11155420,
   'plasma-testnet': 9746,
+  'solana-devnet': SOLANA_DEVNET_ID,
+  'sol-devnet': SOLANA_DEVNET_ID,
+  devnet: SOLANA_DEVNET_ID,
 }
 
 const SUPPORTED_CHAIN_NAMES = [
@@ -34,30 +43,68 @@ const SUPPORTED_CHAIN_NAMES = [
   'optimism',
   'polygon',
   'plasma',
+  'solana-mainnet',
   'sepolia',
   'base-sepolia',
   'arbitrum-sepolia',
   'optimism-sepolia',
   'plasma-testnet',
+  'solana-devnet',
 ]
 
-type ChainClass = 'mainnet' | 'testnet'
+const CANONICAL_NAME: Record<number, string> = Object.fromEntries(
+  SUPPORTED_CHAIN_NAMES.map((n) => [NAME_TO_ID[n], n]),
+)
 
-function resolveChain(input: string): Chain {
-  const lowered = input.trim().toLowerCase()
-  const id = NAME_TO_ID[lowered]
+type ChainClass = 'mainnet' | 'testnet'
+type SolanaCluster = 'mainnet' | 'devnet'
+
+interface TargetBase {
+  name: string
+  chainId: number
+  caip2: string
+  chainClass: ChainClass
+}
+
+interface EvmTarget extends TargetBase {
+  vm: 'evm'
+  chain: Chain
+}
+
+interface SvmTarget extends TargetBase {
+  vm: 'svm'
+  cluster: SolanaCluster
+}
+
+type Target = EvmTarget | SvmTarget
+
+function resolveChain(input: string): Target {
+  const id = NAME_TO_ID[input.trim().toLowerCase()]
   if (!id) {
     throw new ChainUnsupportedError(input)
   }
-  const chain = CHAIN_BY_ID[id]
-  if (!chain) {
+  const entry = chainRegistry[id.toString()]
+  if (!entry) {
     throw new Error(`Chain ${input} (id ${id}) not present in shared-configs`)
   }
-  return chain
-}
-
-function getChainClass(chain: Chain): ChainClass {
-  return chain.testnet ? 'testnet' : 'mainnet'
+  const base: TargetBase = {
+    name: CANONICAL_NAME[id] ?? input,
+    chainId: id,
+    caip2: entry.caip2,
+    chainClass: entry.network,
+  }
+  if (entry.vmType === 'svm') {
+    return {
+      ...base,
+      vm: 'svm',
+      cluster: id === SOLANA_DEVNET_ID ? 'devnet' : 'mainnet',
+    }
+  }
+  const chain = CHAIN_BY_ID[id]
+  if (!chain) {
+    throw new Error(`Chain ${input} (id ${id}) has no viem chain definition`)
+  }
+  return { ...base, vm: 'evm', chain }
 }
 
 class ChainUnsupportedError extends Error {
@@ -73,10 +120,5 @@ class ChainUnsupportedError extends Error {
   }
 }
 
-export type { ChainClass }
-export {
-  ChainUnsupportedError,
-  getChainClass,
-  resolveChain,
-  SUPPORTED_CHAIN_NAMES,
-}
+export type { ChainClass, EvmTarget, SolanaCluster, SvmTarget, Target }
+export { ChainUnsupportedError, resolveChain, SUPPORTED_CHAIN_NAMES }

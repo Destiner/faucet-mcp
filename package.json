@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MCP server that lets a coding agent request small dev funds (ETH/WETH/USDC/USDT) with per-call + 24h caps and TOTP approval.",
+  "description": "MCP server that lets a coding agent request small dev funds (ETH/WETH/USDC/USDT, SOL/USDC on Solana) with per-call + 24h caps and TOTP approval.",
   "license": "MIT",
   "author": "Timur Badretdinov",
   "repository": {
@@ -19,15 +19,20 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "setup": "bun run bin/setup.ts",
+    "solana-keygen": "bun run bin/solana-keygen.ts",
+    "test": "bun test",
     "check": "biome check",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
-    "@rhinestone/shared-configs": "^1.4.91",
+    "@rhinestone/shared-configs": "^2.41.0",
+    "@solana-program/system": "^0.16.0",
+    "@solana-program/token": "^0.18.0",
+    "@solana/kit": "^8.6.0",
     "otplib": "^12.0.1",
     "qrcode-terminal": "^0.12.0",
-    "viem": "^2.48.8",
+    "viem": "^2.57.13",
     "zod": "^3.23.8"
   },
   "devDependencies": {
