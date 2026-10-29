@@ -49,7 +49,7 @@ Mainnet SOL caps stay above the ~0.00089 SOL rent-exempt minimum; below it a sen
 
 ### Errors
 
-`INVALID_INPUT`, `UNSUPPORTED_CHAIN`, `UNSUPPORTED_TOKEN`, `NEEDS_APPROVAL`, `APPROVAL_INVALID`, `HARD_LIMIT_EXCEEDED`, `INSUFFICIENT_FUNDS`, `RPC_ERROR`, `TX_FAILED`, `INTERNAL_ERROR`. Each carries a `hint` describing what to do.
+`INVALID_INPUT`, `UNSUPPORTED_CHAIN`, `UNSUPPORTED_TOKEN`, `NEEDS_APPROVAL`, `APPROVAL_INVALID`, `HARD_LIMIT_EXCEEDED`, `INSUFFICIENT_FUNDS`, `RPC_ERROR`, `TX_FAILED`, `TX_UNCONFIRMED`, `INTERNAL_ERROR`. `TX_UNCONFIRMED` (Solana) means the tx was broadcast but confirmation polling failed; it carries `txHash`, counts against the budget, and must be checked on the explorer before retrying. Each carries a `hint` describing what to do.
 
 ### Supported
 
@@ -104,7 +104,7 @@ Token addresses come from `@rhinestone/shared-configs` `chainRegistry`, not a lo
 
    `bun run --cwd <dir>` makes bun auto-load `.env` from the faucet directory regardless of where the agent is invoked.
 
-State is persisted at `~/.faucet/state.json` (rolling 24h send log + OTP replay cache). Override with `FAUCET_STATE_FILE=`. RPCs can be overridden per chain with `RPC_URL_<chainId>=` (Solana: `RPC_URL_792703809` / `RPC_URL_792703810`; HTTP only — confirmation is polled, no websocket).
+State is persisted at `~/.faucet/state.json` (rolling 24h send log + OTP replay cache). Override with `FAUCET_STATE_FILE=`. RPCs can be overridden per chain with `RPC_URL_<chainId>=` (Solana: `RPC_URL_792703809` / `RPC_URL_792703810`; HTTP only — confirmation is polled, no websocket). Solana RPC calls retry on 429/5xx with backoff, since the public endpoints rate-limit hard; set a private RPC if sends are slow.
 
 ## Limitations (v0.1)
 

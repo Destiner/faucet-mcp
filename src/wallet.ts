@@ -86,6 +86,8 @@ function sendToken(
     : svm.sendToken(target, token, recipient as SolanaAddress, amountRaw)
 }
 
+const { TxUnconfirmedError } = svm
+
 export type { PreflightIssue, SendResult }
 export {
   getFunderAddress,
@@ -94,4 +96,5 @@ export {
   preflight,
   RECIPIENT_FORMAT,
   sendToken,
+  TxUnconfirmedError,
 }

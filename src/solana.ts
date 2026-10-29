@@ -2,17 +2,20 @@ import {
   type Address,
   address,
   appendTransactionMessageInstructions,
+  createDefaultRpcTransport,
   createKeyPairSignerFromBytes,
-  createSolanaRpc,
+  createSolanaRpcFromTransport,
   createTransactionMessage,
   getBase58Encoder,
   getBase64EncodedWireTransaction,
   getSignatureFromTransaction,
   type Instruction,
   isAddress,
+  isSolanaError,
   type KeyPairSigner,
   lamports,
   pipe,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
   setTransactionMessageFeePayerSigner,
   setTransactionMessageLifetimeUsingBlockhash,
   signTransactionMessageWithSigners,
@@ -41,13 +44,76 @@ const DEFAULT_RPC: Record<SvmTarget['cluster'], string> = {
   devnet: 'https://api.devnet.solana.com',
 }
 
-function getRpc(target: SvmTarget) {
-  const url =
-    process.env[`RPC_URL_${target.chainId}`] ?? DEFAULT_RPC[target.cluster]
-  return createSolanaRpc(url)
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504])
+const MAX_RETRIES = 5
+
+// Public Solana RPCs rate-limit aggressively; retrying is safe for every call we
+// make, including sendTransaction (same signed bytes, deduplicated by signature).
+function createRetryingTransport(url: string) {
+  const inner = createDefaultRpcTransport({ url })
+  const transport: typeof inner = async (config) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await inner(config)
+      } catch (err) {
+        if (
+          attempt >= MAX_RETRIES ||
+          !isSolanaError(err, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR) ||
+          !RETRYABLE_STATUS.has(err.context.statusCode)
+        ) {
+          throw err
+        }
+        const retryAfter = Number(err.context.headers.get('retry-after'))
+        await Bun.sleep(retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt)
+      }
+    }
+  }
+  return transport
 }
 
-type Rpc = ReturnType<typeof getRpc>
+function createRpc(url: string) {
+  return createSolanaRpcFromTransport(createRetryingTransport(url))
+}
+
+type Rpc = ReturnType<typeof createRpc>
+
+const rpcByChain = new Map<number, Rpc>()
+
+function getRpc(target: SvmTarget): Rpc {
+  let rpc = rpcByChain.get(target.chainId)
+  if (!rpc) {
+    rpc = createRpc(
+      process.env[`RPC_URL_${target.chainId}`] ?? DEFAULT_RPC[target.cluster],
+    )
+    rpcByChain.set(target.chainId, rpc)
+  }
+  return rpc
+}
+
+// Mint owners and rent minimums don't change for the lifetime of the process.
+const tokenProgramByMint = new Map<Address, Address>()
+const rentBySize = new Map<bigint, bigint>()
+
+async function getRentExempt(rpc: Rpc, size: bigint): Promise<bigint> {
+  let rent = rentBySize.get(size)
+  if (rent === undefined) {
+    rent = await rpc.getMinimumBalanceForRentExemption(size).send()
+    rentBySize.set(size, rent)
+  }
+  return rent
+}
+
+class TxUnconfirmedError extends Error {
+  constructor(
+    public readonly txHash: string,
+    public readonly blockExplorerUrl: string,
+    cause: unknown,
+  ) {
+    super(
+      `Transaction ${txHash} was broadcast but its outcome is unknown: ${(cause as Error).message}`,
+    )
+  }
+}
 
 let signerPromise: Promise<KeyPairSigner> | undefined
 
@@ -89,11 +155,15 @@ async function getSplContext(
   funder: Address,
   recipient?: Address,
 ): Promise<SplContext> {
-  const mintInfo = await rpc
-    .getAccountInfo(mint, { encoding: 'base64', commitment: 'confirmed' })
-    .send()
-  if (!mintInfo.value) throw new Error(`Mint ${mint} not found`)
-  const tokenProgram = mintInfo.value.owner
+  let tokenProgram = tokenProgramByMint.get(mint)
+  if (!tokenProgram) {
+    const mintInfo = await rpc
+      .getAccountInfo(mint, { encoding: 'base64', commitment: 'confirmed' })
+      .send()
+    if (!mintInfo.value) throw new Error(`Mint ${mint} not found`)
+    tokenProgram = mintInfo.value.owner
+    tokenProgramByMint.set(mint, tokenProgram)
+  }
   const [funderAta] = await findAssociatedTokenPda({
     owner: funder,
     mint,
@@ -177,7 +247,7 @@ async function preflight(
         commitment: 'confirmed',
       })
       .send(),
-    rpc.getMinimumBalanceForRentExemption(0n).send(),
+    getRentExempt(rpc, 0n),
   ])
   const recipientOwner = recipientInfo.value?.owner
   if (
@@ -242,9 +312,7 @@ async function preflight(
     }
   }
   if (!recipientAtaInfo.value) {
-    solNeeded += await rpc
-      .getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_SIZE)
-      .send()
+    solNeeded += await getRentExempt(rpc, TOKEN_ACCOUNT_SIZE)
   }
   if (solBalance < solNeeded) {
     return {
@@ -337,21 +405,34 @@ async function sendToken(
   )
   const signed = await signTransactionMessageWithSigners(message)
   const signature = getSignatureFromTransaction(signed)
+  const cluster = target.cluster === 'devnet' ? '?cluster=devnet' : ''
+  const blockExplorerUrl = `https://explorer.solana.com/tx/${signature}${cluster}`
+
   await rpc
     .sendTransaction(getBase64EncodedWireTransaction(signed), {
       encoding: 'base64',
       preflightCommitment: 'confirmed',
     })
     .send()
-  await waitForConfirmation(rpc, signature, blockhash.lastValidBlockHeight)
+  try {
+    await waitForConfirmation(rpc, signature, blockhash.lastValidBlockHeight)
+  } catch (err) {
+    if (err instanceof TxDefinitelyFailedError) throw err
+    throw new TxUnconfirmedError(signature, blockExplorerUrl, err)
+  }
 
-  const cluster = target.cluster === 'devnet' ? '?cluster=devnet' : ''
   return {
     txHash: signature,
-    blockExplorerUrl: `https://explorer.solana.com/tx/${signature}${cluster}`,
+    blockExplorerUrl,
     ...(ataCreated !== undefined ? { ataCreated } : {}),
   }
 }
+
+// Thrown only when the chain says the tx failed or can no longer land.
+class TxDefinitelyFailedError extends Error {}
+
+const POLL_INTERVAL_MS = 2000
+const BLOCK_HEIGHT_CHECK_EVERY = 5
 
 // Polling instead of a websocket subscription keeps a single HTTP RPC URL
 // sufficient for overrides.
@@ -361,11 +442,12 @@ async function waitForConfirmation(
   lastValidBlockHeight: bigint,
 ): Promise<void> {
   const deadline = Date.now() + CONFIRM_TIMEOUT_MS
-  while (Date.now() < deadline) {
+  for (let i = 1; Date.now() < deadline; i++) {
+    await Bun.sleep(POLL_INTERVAL_MS)
     const { value } = await rpc.getSignatureStatuses([signature]).send()
     const status = value[0]
     if (status?.err) {
-      throw new Error(
+      throw new TxDefinitelyFailedError(
         `Transaction ${signature} failed: ${JSON.stringify(status.err, (_, v) => (typeof v === 'bigint' ? v.toString() : v))}`,
       )
     }
@@ -375,11 +457,16 @@ async function waitForConfirmation(
     ) {
       return
     }
-    const height = await rpc.getBlockHeight({ commitment: 'confirmed' }).send()
-    if (height > lastValidBlockHeight) {
-      throw new Error(`Transaction ${signature} expired before confirmation`)
+    if (i % BLOCK_HEIGHT_CHECK_EVERY === 0) {
+      const height = await rpc
+        .getBlockHeight({ commitment: 'confirmed' })
+        .send()
+      if (height > lastValidBlockHeight) {
+        throw new TxDefinitelyFailedError(
+          `Transaction ${signature} expired before confirmation`,
+        )
+      }
     }
-    await Bun.sleep(1000)
   }
   throw new Error(`Transaction ${signature} not confirmed within 60s`)
 }
@@ -391,4 +478,5 @@ export {
   isSolanaAddress,
   preflight,
   sendToken,
+  TxUnconfirmedError,
 }

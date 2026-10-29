@@ -33,6 +33,7 @@ import {
   preflight,
   RECIPIENT_FORMAT,
   sendToken,
+  TxUnconfirmedError,
 } from './wallet'
 
 const sendInputSchema = z.object({
@@ -274,10 +275,34 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
   }
 
   // 4. Execute
+  const record = (txHash: string) =>
+    recordSend({
+      ts: Date.now(),
+      chainId: target.chainId,
+      chainClass,
+      token,
+      pool,
+      amount: amountNum,
+      recipient: input.recipient,
+      txHash,
+    })
   let result: Awaited<ReturnType<typeof sendToken>>
   try {
     result = await sendToken(target, token, input.recipient, amountRaw)
   } catch (err) {
+    if (err instanceof TxUnconfirmedError) {
+      // Count it against the budget: it may still land.
+      record(err.txHash)
+      return errorContent({
+        code: 'TX_UNCONFIRMED',
+        message: err.message,
+        txHash: err.txHash,
+        blockExplorerUrl: err.blockExplorerUrl,
+        chain: target.name,
+        token,
+        hint: 'Check the explorer link before retrying; resending may double-pay.',
+      })
+    }
     return errorContent({
       code: 'TX_FAILED',
       message: (err as Error).message,
@@ -287,16 +312,7 @@ async function handleSend(input: z.infer<typeof sendInputSchema>) {
   }
 
   // 5. Record
-  recordSend({
-    ts: Date.now(),
-    chainId: target.chainId,
-    chainClass,
-    token,
-    pool,
-    amount: amountNum,
-    recipient: input.recipient,
-    txHash: result.txHash,
-  })
+  record(result.txHash)
 
   return okContent({
     ok: true,
