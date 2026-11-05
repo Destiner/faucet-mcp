@@ -1,10 +1,16 @@
-import { authenticator } from 'otplib'
+import { createGuardrails, verifySync } from 'otplib'
 import { isOtpConsumed, recordOtpUse } from './state'
 
-authenticator.options = {
-  window: 1, // allow ±30s drift
-  step: 30,
-  digits: 6,
+function matchesOtp(token: string, secret: string): boolean {
+  return verifySync({
+    token,
+    secret,
+    epochTolerance: 30,
+    period: 30,
+    digits: 6,
+    // v12 setup generated 10-byte secrets; keep existing authenticators valid.
+    guardrails: createGuardrails({ MIN_SECRET_BYTES: 10 }),
+  }).valid
 }
 
 type OtpVerifyResult =
@@ -29,7 +35,7 @@ function verifyOtp(code: string | undefined): OtpVerifyResult {
   if (isOtpConsumed(normalized)) {
     return { ok: false, reason: 'replayed' }
   }
-  if (!authenticator.check(normalized, secret)) {
+  if (!matchesOtp(normalized, secret)) {
     return { ok: false, reason: 'invalid' }
   }
   recordOtpUse(normalized)
@@ -37,4 +43,4 @@ function verifyOtp(code: string | undefined): OtpVerifyResult {
 }
 
 export type { OtpVerifyResult }
-export { verifyOtp }
+export { matchesOtp, verifyOtp }
