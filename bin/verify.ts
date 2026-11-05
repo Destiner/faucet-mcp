@@ -1,7 +1,5 @@
 #!/usr/bin/env bun
-import { authenticator } from 'otplib'
-
-authenticator.options = { window: 1, step: 30, digits: 6 }
+import { matchesOtp } from '../src/otp'
 
 const code = process.argv[2]
 const secret = process.env.FAUCET_TOTP_SECRET
@@ -15,7 +13,7 @@ if (!secret) {
   process.exit(2)
 }
 
-const ok = authenticator.check(code.replace(/\s+/g, ''), secret)
+const ok = matchesOtp(code.replace(/\s+/g, ''), secret)
 if (ok) {
   console.info('OK — code is valid')
   process.exit(0)

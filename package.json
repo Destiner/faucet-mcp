@@ -25,20 +25,20 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.0",
-    "@rhinestone/shared-configs": "^2.41.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@rhinestone/shared-configs": "^2.50.0",
     "@solana-program/system": "^0.16.0",
     "@solana-program/token": "^0.18.0",
     "@solana/kit": "^8.6.0",
-    "otplib": "^12.0.1",
+    "otplib": "^13.6.0",
     "qrcode-terminal": "^0.12.0",
-    "viem": "^2.57.13",
-    "zod": "^3.23.8"
+    "viem": "^2.57.16",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.1.0",
-    "@types/bun": "^1.2.8",
+    "@biomejs/biome": "^2.6.5",
+    "@types/bun": "^1.4.4",
     "@types/qrcode-terminal": "^0.12.2",
-    "typescript": "^5.8.2"
+    "typescript": "^7.0.2"
   }
 }

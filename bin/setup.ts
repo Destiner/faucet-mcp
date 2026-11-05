@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
-import { authenticator } from 'otplib'
+import { generateSecret, generateURI } from 'otplib'
 import qrcode from 'qrcode-terminal'
 
 const ACCOUNT = process.argv[2] ?? 'default'
 const ISSUER = 'Rhinestone Faucet'
 
-const secret = authenticator.generateSecret()
-const uri = authenticator.keyuri(ACCOUNT, ISSUER, secret)
+const secret = generateSecret()
+const uri = generateURI({ label: ACCOUNT, issuer: ISSUER, secret })
 
 console.info('')
 console.info('=== Faucet TOTP setup ===')
