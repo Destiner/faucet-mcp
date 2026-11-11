@@ -8,15 +8,15 @@ interface LimitConfig {
   hardWindow24h: number
 }
 
-// All amounts are in human/decimal units (e.g. 0.10 USDC, 0.00002 ETH).
+// All amounts are in human/decimal units (e.g. 100 USDC, 0.00002 ETH).
 // Hard caps are 10x the soft caps and cannot be bypassed even with a valid OTP.
 const LIMITS: Record<ChainClass, Record<TokenPool, LimitConfig>> = {
   mainnet: {
     STABLE: {
-      perCall: 0.1,
-      window24h: 1,
-      hardPerCall: 1,
-      hardWindow24h: 10,
+      perCall: 100,
+      window24h: 100,
+      hardPerCall: 1000,
+      hardWindow24h: 1000,
     },
     ETHWETH: {
       perCall: 0.00002,

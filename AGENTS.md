@@ -31,7 +31,7 @@ So 0.5 USDC and 0.5 USDT in the same 24h count as 1.0 against the stable window.
 
 | Chain class | Pool   | Soft/call | Soft 24h | Hard/call | Hard 24h |
 | ----------- | ------ | --------- | -------- | --------- | -------- |
-| mainnet     | stable | 0.10      | 1.0      | 1.0       | 10.0     |
+| mainnet     | stable | 100       | 100      | 1000      | 1000     |
 | mainnet     | eth    | 0.00002   | 0.0005   | 0.0002    | 0.005    |
 | mainnet     | sol    | 0.002     | 0.02     | 0.02      | 0.2      |
 | testnet     | stable | 2         | 20       | 20        | 200      |
